@@ -17,11 +17,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android 37 SDK
-        run: sdkmanager "platforms;android-37"
+      - name: Prepare Android 37 SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-37"
 
       - name: Fetch audited Lawnicons master base
         run: |
