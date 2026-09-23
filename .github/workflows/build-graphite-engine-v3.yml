@@ -1,0 +1,265 @@
+name: Build Graphite Engine v3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Graphite repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21 like Lawnicons upstream
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '21'
+
+      - name: Setup Gradle like Lawnicons upstream
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Fetch audited Lawnicons master base
+        run: |
+          rm -rf work
+          mkdir -p work/lawnicons
+          cd work/lawnicons
+          git init
+          git remote add origin https://github.com/LawnchairLauncher/lawnicons.git
+          git fetch --depth 1 origin 3a4eea094d23e29aceb1937b3db3312baf979af1
+          git checkout --detach FETCH_HEAD
+          chmod +x gradlew
+
+      - name: Transform Lawnicons into Graphite Engine
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import shutil
+          import xml.etree.ElementTree as ET
+
+          root = Path('work/lawnicons')
+          app_id = 'com.graphite.engine.v3'
+          app_name = 'Graphite Engine v3'
+          apk_prefix = 'Graphite-Engine-v3'
+          foreground = '#FFD0D1D4'
+          background_start = '#FF303136'
+          background_center = '#FF1D1E21'
+          background_end = '#FF0F1012'
+          foreground_inset = '24%'
+          monochrome_inset = '22%'
+
+          def replace_once(text, old, new, label):
+              if old not in text:
+                  raise SystemExit(f'Missing expected pattern: {label}')
+              return text.replace(old, new, 1)
+
+          # Keep upstream compileSdk 37 and toolchain unchanged.
+          build_file = root / 'app/build.gradle.kts'
+          text = build_file.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              'applicationId = "app.lawnchair.lawnicons"',
+              f'applicationId = "{app_id}"',
+              'applicationId',
+          )
+          text = replace_once(
+              text,
+              'resValue("string", "apps_name", "Lawnicons")',
+              f'resValue("string", "apps_name", "{app_name}")',
+              'apps_name',
+          )
+          text = replace_once(
+              text,
+              'val newApkName = "Lawnicons ${versionName.get()} v${versionCode.get()}_${variant.buildType}.apk"',
+              f'val newApkName = "{apk_prefix} ' + '$' + '{versionName.get()} v' + '$' + '{versionCode.get()}_' + '$' + '{variant.buildType}.apk"',
+              'APK output name',
+          )
+          build_file.write_text(text, encoding='utf-8')
+
+          manifest = root / 'app/src/main/AndroidManifest.xml'
+          manifest_text = manifest.read_text(encoding='utf-8')
+          for category in (
+              'org.icontheme.CHANGES_WITH_MATERIAL_YOU_COLORS',
+              'org.icontheme.CHANGES_WITH_DARK_MODE',
+              'org.icontheme.FALLBACK_TO_THEMED_ICON',
+          ):
+              manifest_text = re.sub(
+                  rf'\s*<category android:name="{re.escape(category)}"\s*/>',
+                  '',
+                  manifest_text,
+              )
+          manifest_text = re.sub(
+              r'\s*<!-- Lawnchair Launcher 14 -->\s*<intent-filter>\s*'
+              r'<action android:name="app\.lawnchair\.icons\.THEMED_ICON"\s*/>\s*'
+              r'<category android:name="android\.intent\.category\.DEFAULT"\s*/>\s*'
+              r'</intent-filter>',
+              '',
+              manifest_text,
+              flags=re.S,
+          )
+          manifest.write_text(manifest_text, encoding='utf-8')
+
+          colors = root / 'app/src/main/res/values/colors.xml'
+          text = colors.read_text(encoding='utf-8')
+          text, n1 = re.subn(
+              r'<color name="primaryBackground">.*?</color>',
+              f'<color name="primaryBackground">{background_end}</color>',
+              text,
+              count=1,
+          )
+          text, n2 = re.subn(
+              r'<color name="primaryForeground">.*?</color>',
+              f'<color name="primaryForeground">{foreground}</color>',
+              text,
+              count=1,
+          )
+          if n1 != 1 or n2 != 1:
+              raise SystemExit('Could not patch Graphite colors')
+          colors.write_text(text, encoding='utf-8')
+
+          # Android 12+ uses values-v31, and dark mode may use values-night-v31.
+          # Overwrite all qualifier variants so system Material You colors can
+          # never replace the Graphite palette.
+          fixed_color_xml = f'''<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="primaryBackground">{background_end}</color>
+              <color name="primaryForeground">{foreground}</color>
+          </resources>
+          '''
+          for qualifier in ('values-v31', 'values-night', 'values-night-v31'):
+              q = root / 'app/src/main/res' / qualifier / 'colors.xml'
+              q.parent.mkdir(parents=True, exist_ok=True)
+              q.write_text(fixed_color_xml, encoding='utf-8')
+
+          processor = root / 'svg-processor/src/main/kotlin/app/lawnchair/lawnicons/helper/SvgFilesProcessor.kt'
+          text = processor.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              'val fg = "@color/primaryForeground"',
+              f'val fg = "{foreground}"',
+              'fixed Graphite foreground',
+          )
+          text = replace_once(
+              text,
+              'val bg = "@color/primaryBackground"',
+              'val bg = "@drawable/graphite_background"',
+              'adaptive icon background',
+          )
+          text = replace_once(
+              text,
+              '.addAttribute("android:inset", "32%")',
+              f'.addAttribute("android:inset", "{foreground_inset}")',
+              'foreground inset',
+          )
+          monochrome_block = '''        root.addElement("monochrome").addElement("layer-list").addElement("item")
+            .addElement("inset")
+            .addAttribute("android:inset", "28%")
+            .addAttribute(
+                "android:drawable",
+                "@drawable/" + FilenameUtils.getBaseName(foregroundXml),
+            )
+'''
+          if monochrome_block not in text:
+              raise SystemExit('Missing expected monochrome block')
+          text = text.replace(monochrome_block, '', 1)
+          processor.write_text(text, encoding='utf-8')
+
+          background = root / 'app/src/main/res/drawable/graphite_background.xml'
+          background.parent.mkdir(parents=True, exist_ok=True)
+          background.write_text(f'''<?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient
+                  android:angle="135"
+                  android:startColor="{background_start}"
+                  android:centerColor="{background_center}"
+                  android:endColor="{background_end}"
+                  android:type="linear" />
+          </shape>
+          ''', encoding='utf-8')
+
+          assets = root / 'app/src/main/assets'
+          assets.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile(root / 'LICENSE', assets / 'LICENSE_LAWNICONS.txt')
+          (assets / 'GRAPHITE_DERIVATIVE_NOTICE.txt').write_text(
+              'Graphite Engine v3 is a modified derivative build based on Lawnicons.\n'
+              'Source base: LawnchairLauncher/lawnicons commit '
+              '3a4eea094d23e29aceb1937b3db3312baf979af1.\n'
+              'Modifications: application identity, Graphite palette, shared satin '
+              'background, foreground sizing, and packaging.\n',
+              encoding='utf-8',
+          )
+
+          appfilter = root / 'app/assets/appfilter.xml'
+          xml_root = ET.parse(appfilter).getroot()
+          items = xml_root.findall('item')
+          packages = set()
+          drawables = set()
+          for item in items:
+              comp = item.attrib.get('component', '')
+              match = re.match(r'ComponentInfo\{([^/]+)/', comp)
+              if match:
+                  packages.add(match.group(1))
+              drawable = item.attrib.get('drawable')
+              if drawable:
+                  drawables.add(drawable)
+          svgs = list((root / 'svgs').glob('*.svg'))
+          report = Path('graphite-engine-v3-report.txt')
+          report.write_text(
+              'GRAPHITE ENGINE v1 BUILD REPORT\n'
+              '================================\n'
+              'Lawnicons commit: 3a4eea094d23e29aceb1937b3db3312baf979af1\n'
+              f'Component mappings: {len(items)}\n'
+              f'Unique packages: {len(packages)}\n'
+              f'Unique mapped drawables: {len(drawables)}\n'
+              f'SVG source icons: {len(svgs)}\n'
+              f'Application ID: {app_id}\n'
+              f'Foreground: {foreground}\n'
+              f'Foreground inset: {foreground_inset}\n',
+              encoding='utf-8',
+          )
+          print(report.read_text())
+          PY
+
+      - name: Build all Graphite vector icons and APK
+        run: |
+          cd work/lawnicons
+          ./gradlew app:assembleDebug --stacktrace
+
+      - name: Collect APK
+        run: |
+          set -e
+          APK="$(find work/lawnicons/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "APK not found"
+            find work/lawnicons/app/build/outputs -maxdepth 6 -type f || true
+            exit 1
+          fi
+          cp "$APK" Graphite-Engine-v3.apk
+          echo "Built: $APK"
+          ls -lh Graphite-Engine-v3.apk
+
+      - name: Add generated-resource counts to report
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          runtime = Path('work/lawnicons/app/src/runtime/res/drawable')
+          all_xml = list(runtime.glob('*.xml')) if runtime.exists() else []
+          fg = list(runtime.glob('*_foreground.xml')) if runtime.exists() else []
+          report = Path('graphite-engine-v3-report.txt')
+          with report.open('a', encoding='utf-8') as f:
+              f.write(f'Generated drawable XML files: {len(all_xml)}\n')
+              f.write(f'Generated foreground vectors: {len(fg)}\n')
+              f.write(f'APK size bytes: {Path("Graphite-Engine-v3.apk").stat().st_size}\n')
+          print(report.read_text())
+          PY
+
+      - name: Upload Graphite Engine APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Graphite-Engine-v3
+          path: |
+            Graphite-Engine-v3.apk
+            graphite-engine-v3-report.txt
+          if-no-files-found: error
