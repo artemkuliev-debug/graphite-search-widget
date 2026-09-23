@@ -11,40 +11,14 @@ jobs:
       - name: Checkout Graphite repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Setup Java 21 like Lawnicons upstream
         uses: actions/setup-java@v5
         with:
-          distribution: temurin
-          java-version: '17'
+          distribution: zulu
+          java-version: '21'
 
-      - name: Prepare Android SDK
-        env:
-          ANDROID_HOME: /usr/local/lib/android/sdk
-          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-        run: |
-          set -e
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -perm -111 | sort -V | tail -n 1)"
-          fi
-          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "sdkmanager not found under $ANDROID_HOME"
-            exit 1
-          fi
-          echo "Using sdkmanager: $SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          if "$SDKMANAGER" --list | grep -q 'platforms;android-37'; then
-            API=37
-          else
-            API=36
-          fi
-          echo "Using Android API $API"
-          echo "GRAPHITE_COMPILE_SDK=$API" >> "$GITHUB_ENV"
-
-          if [ ! -d "$ANDROID_HOME/platforms/android-$API" ]; then
-            "$SDKMANAGER" "platforms;android-$API"
-          fi
+      - name: Setup Gradle like Lawnicons upstream
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Fetch audited Lawnicons master base
         run: |
@@ -61,7 +35,6 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import os
           import re
           import shutil
           import xml.etree.ElementTree as ET
@@ -82,17 +55,9 @@ jobs:
                   raise SystemExit(f'Missing expected pattern: {label}')
               return text.replace(old, new, 1)
 
-          # Give the derivative build its own install ID/name while keeping
-          # Lawnicons' Kotlin namespace intact, so we do not have to refactor code.
+          # Keep upstream compileSdk 37 and toolchain unchanged.
           build_file = root / 'app/build.gradle.kts'
           text = build_file.read_text(encoding='utf-8')
-          compile_sdk = os.environ.get('GRAPHITE_COMPILE_SDK', '36')
-          text = replace_once(
-              text,
-              'compileSdk = 37',
-              f'compileSdk = {compile_sdk}',
-              'compileSdk',
-          )
           text = replace_once(
               text,
               'applicationId = "app.lawnchair.lawnicons"',
@@ -113,8 +78,6 @@ jobs:
           )
           build_file.write_text(text, encoding='utf-8')
 
-          # Graphite palette. The SVG processor maps every non-transparent
-          # Lawnicons stroke/fill to primaryForeground.
           colors = root / 'app/src/main/res/values/colors.xml'
           text = colors.read_text(encoding='utf-8')
           text, n1 = re.subn(
@@ -133,8 +96,6 @@ jobs:
               raise SystemExit('Could not patch Graphite colors')
           colors.write_text(text, encoding='utf-8')
 
-          # Use one shared satin background drawable for all 10k+ icons and
-          # enlarge the foreground compared with stock Lawnicons.
           processor = root / 'svg-processor/src/main/kotlin/app/lawnchair/lawnicons/helper/SvgFilesProcessor.kt'
           text = processor.read_text(encoding='utf-8')
           text = replace_once(
@@ -170,7 +131,6 @@ jobs:
           </shape>
           ''', encoding='utf-8')
 
-          # Apache-2.0 compliance for the Lawnicons-derived base.
           assets = root / 'app/src/main/assets'
           assets.mkdir(parents=True, exist_ok=True)
           shutil.copyfile(root / 'LICENSE', assets / 'LICENSE_LAWNICONS.txt')
@@ -183,7 +143,6 @@ jobs:
               encoding='utf-8',
           )
 
-          # Reproducible coverage report before Gradle generates Android vectors.
           appfilter = root / 'app/assets/appfilter.xml'
           xml_root = ET.parse(appfilter).getroot()
           items = xml_root.findall('item')
@@ -218,7 +177,7 @@ jobs:
       - name: Build all Graphite vector icons and APK
         run: |
           cd work/lawnicons
-          ./gradlew :app:assembleAppDebug --stacktrace
+          ./gradlew app:assembleDebug --stacktrace
 
       - name: Collect APK
         run: |
