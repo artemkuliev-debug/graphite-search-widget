@@ -77,7 +77,7 @@ jobs:
           text = replace_once(
               text,
               'val newApkName = "Lawnicons ${versionName.get()} v${versionCode.get()}_${variant.buildType}.apk"',
-              f'val newApkName = "{apk_prefix} ${{versionName.get()}} v${{versionCode.get()}}_${{variant.buildType}}.apk"',
+              f'val newApkName = "{apk_prefix} ' + '$' + '{versionName.get()} v' + '$' + '{versionCode.get()}_' + '$' + '{variant.buildType}.apk"',
               'APK output name',
           )
           build_file.write_text(text, encoding='utf-8')
