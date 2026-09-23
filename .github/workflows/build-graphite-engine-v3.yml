@@ -160,7 +160,7 @@ jobs:
                 "android:drawable",
                 "@drawable/" + FilenameUtils.getBaseName(foregroundXml),
             )
-'''
+          '''
           if monochrome_block not in text:
               raise SystemExit('Missing expected monochrome block')
           text = text.replace(monochrome_block, '', 1)
