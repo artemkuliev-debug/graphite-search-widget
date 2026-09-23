@@ -17,7 +17,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Prepare Android 37 SDK
+      - name: Prepare Android SDK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -29,12 +29,22 @@ jobs:
           fi
           if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
             echo "sdkmanager not found under $ANDROID_HOME"
-            find "$ANDROID_HOME" -maxdepth 4 -type f -name sdkmanager -print || true
             exit 1
           fi
           echo "Using sdkmanager: $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platforms;android-37"
+
+          if "$SDKMANAGER" --list | grep -q 'platforms;android-37'; then
+            API=37
+          else
+            API=36
+          fi
+          echo "Using Android API $API"
+          echo "GRAPHITE_COMPILE_SDK=$API" >> "$GITHUB_ENV"
+
+          if [ ! -d "$ANDROID_HOME/platforms/android-$API" ]; then
+            "$SDKMANAGER" "platforms;android-$API"
+          fi
 
       - name: Fetch audited Lawnicons master base
         run: |
@@ -51,6 +61,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import os
           import re
           import shutil
           import xml.etree.ElementTree as ET
@@ -75,6 +86,13 @@ jobs:
           # Lawnicons' Kotlin namespace intact, so we do not have to refactor code.
           build_file = root / 'app/build.gradle.kts'
           text = build_file.read_text(encoding='utf-8')
+          compile_sdk = os.environ.get('GRAPHITE_COMPILE_SDK', '36')
+          text = replace_once(
+              text,
+              'compileSdk = 37',
+              f'compileSdk = {compile_sdk}',
+              'compileSdk',
+          )
           text = replace_once(
               text,
               'applicationId = "app.lawnchair.lawnicons"',
