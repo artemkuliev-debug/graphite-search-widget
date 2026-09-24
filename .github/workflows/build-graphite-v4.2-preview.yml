@@ -1,0 +1,416 @@
+name: Build Graphite v4.2 Preview
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-graphite-v4.2-preview.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Graphite repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21 like Lawnicons upstream
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '21'
+
+      - name: Setup Gradle like Lawnicons upstream
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Fetch audited Lawnicons master base
+        run: |
+          rm -rf work
+          mkdir -p work/lawnicons
+          cd work/lawnicons
+          git init
+          git remote add origin https://github.com/LawnchairLauncher/lawnicons.git
+          git fetch --depth 1 origin 3a4eea094d23e29aceb1937b3db3312baf979af1
+          git checkout --detach FETCH_HEAD
+          chmod +x gradlew
+
+      - name: Transform Lawnicons into Graphite Engine
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import shutil
+          import xml.etree.ElementTree as ET
+
+          root = Path('work/lawnicons')
+          app_id = 'com.graphite.preview.v42'
+          app_name = 'Graphite v4.2 Preview'
+          apk_prefix = 'Graphite-v4.2-Preview'
+          foreground = '#FFD0D1D4'
+          background_start = '#FF303136'
+          background_center = '#FF1D1E21'
+          background_end = '#FF0F1012'
+          foreground_inset = '24%'
+          monochrome_inset = '22%'
+
+          def replace_once(text, old, new, label):
+              if old not in text:
+                  raise SystemExit(f'Missing expected pattern: {label}')
+              return text.replace(old, new, 1)
+
+          # Keep upstream compileSdk 37 and toolchain unchanged.
+          build_file = root / 'app/build.gradle.kts'
+          text = build_file.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              'applicationId = "app.lawnchair.lawnicons"',
+              f'applicationId = "{app_id}"',
+              'applicationId',
+          )
+          text = replace_once(
+              text,
+              'resValue("string", "apps_name", "Lawnicons")',
+              f'resValue("string", "apps_name", "{app_name}")',
+              'apps_name',
+          )
+          text = replace_once(
+              text,
+              'val newApkName = "Lawnicons ${versionName.get()} v${versionCode.get()}_${variant.buildType}.apk"',
+              f'val newApkName = "{apk_prefix} ' + '$' + '{versionName.get()} v' + '$' + '{versionCode.get()}_' + '$' + '{variant.buildType}.apk"',
+              'APK output name',
+          )
+          build_file.write_text(text, encoding='utf-8')
+
+          manifest = root / 'app/src/main/AndroidManifest.xml'
+          manifest_text = manifest.read_text(encoding='utf-8')
+          for category in (
+              'org.icontheme.CHANGES_WITH_MATERIAL_YOU_COLORS',
+              'org.icontheme.CHANGES_WITH_DARK_MODE',
+              'org.icontheme.FALLBACK_TO_THEMED_ICON',
+          ):
+              manifest_text = re.sub(
+                  rf'\s*<category android:name="{re.escape(category)}"\s*/>',
+                  '',
+                  manifest_text,
+              )
+          manifest_text = re.sub(
+              r'\s*<!-- Lawnchair Launcher 14 -->\s*<intent-filter>\s*'
+              r'<action android:name="app\.lawnchair\.icons\.THEMED_ICON"\s*/>\s*'
+              r'<category android:name="android\.intent\.category\.DEFAULT"\s*/>\s*'
+              r'</intent-filter>',
+              '',
+              manifest_text,
+              flags=re.S,
+          )
+          manifest.write_text(manifest_text, encoding='utf-8')
+
+          colors = root / 'app/src/main/res/values/colors.xml'
+          text = colors.read_text(encoding='utf-8')
+          text, n1 = re.subn(
+              r'<color name="primaryBackground">.*?</color>',
+              f'<color name="primaryBackground">{background_end}</color>',
+              text,
+              count=1,
+          )
+          text, n2 = re.subn(
+              r'<color name="primaryForeground">.*?</color>',
+              f'<color name="primaryForeground">{foreground}</color>',
+              text,
+              count=1,
+          )
+          if n1 != 1 or n2 != 1:
+              raise SystemExit('Could not patch Graphite colors')
+          colors.write_text(text, encoding='utf-8')
+
+          # Android 12+ uses values-v31, and dark mode may use values-night-v31.
+          # Overwrite all qualifier variants so system Material You colors can
+          # never replace the Graphite palette.
+          fixed_color_xml = f'''<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="primaryBackground">{background_end}</color>
+              <color name="primaryForeground">{foreground}</color>
+          </resources>
+          '''
+          for qualifier in ('values-v31', 'values-night', 'values-night-v31'):
+              q = root / 'app/src/main/res' / qualifier / 'colors.xml'
+              q.parent.mkdir(parents=True, exist_ok=True)
+              q.write_text(fixed_color_xml, encoding='utf-8')
+
+          processor = root / 'svg-processor/src/main/kotlin/app/lawnchair/lawnicons/helper/SvgFilesProcessor.kt'
+          text = processor.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              'val fg = "@color/primaryForeground"',
+              f'val fg = "{foreground}"',
+              'fixed Graphite foreground',
+          )
+          text = replace_once(
+              text,
+              'val bg = "@color/primaryBackground"',
+              'val bg = "@drawable/graphite_background"',
+              'adaptive icon background',
+          )
+          text = replace_once(
+              text,
+              '.addAttribute("android:inset", "32%")',
+              f'.addAttribute("android:inset", "{foreground_inset}")',
+              'foreground inset',
+          )
+          # Remove Lawnicons monochrome/themed layer robustly.
+          start_marker = '        root.addElement("monochrome")'
+          end_marker = '        XmlUtil.writeDocumentToFile'
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start == -1 or end == -1:
+              raise SystemExit('Could not locate monochrome section')
+          text = text[:start] + text[end:]
+          processor.write_text(text, encoding='utf-8')
+
+          background = root / 'app/src/main/res/drawable/graphite_background.xml'
+          background.parent.mkdir(parents=True, exist_ok=True)
+          background.write_text(f'''<?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient
+                  android:angle="135"
+                  android:startColor="{background_start}"
+                  android:centerColor="{background_center}"
+                  android:endColor="{background_end}"
+                  android:type="linear" />
+          </shape>
+          ''', encoding='utf-8')
+
+          # --- Graphite widgets: restored early minimal Search + Clock ---
+          widget_java = root / 'app/src/main/java/app/lawnchair/lawnicons/widgets'
+          widget_java.mkdir(parents=True, exist_ok=True)
+
+          (widget_java / 'SearchWidgetProvider.java').write_text(r"""package app.lawnchair.lawnicons.widgets;
+
+          import android.app.PendingIntent;
+          import android.app.SearchManager;
+          import android.appwidget.AppWidgetManager;
+          import android.appwidget.AppWidgetProvider;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.widget.RemoteViews;
+          import app.lawnchair.lawnicons.R;
+
+          public class SearchWidgetProvider extends AppWidgetProvider {
+              @Override
+              public void onUpdate(Context context, AppWidgetManager manager, int[] appWidgetIds) {
+                  for (int id : appWidgetIds) update(context, manager, id);
+              }
+
+              private static void update(Context context, AppWidgetManager manager, int id) {
+                  RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_search_satin);
+                  PendingIntent search = PendingIntent.getActivity(context, 4101, searchIntent(context), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  PendingIntent voice = PendingIntent.getActivity(context, 4102, voiceIntent(context), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  views.setOnClickPendingIntent(R.id.search_root, search);
+                  views.setOnClickPendingIntent(R.id.search_icon, search);
+                  views.setOnClickPendingIntent(R.id.search_label, search);
+                  views.setOnClickPendingIntent(R.id.search_mic, voice);
+                  manager.updateAppWidget(id, views);
+              }
+
+              private static Intent searchIntent(Context context) {
+                  Intent i = new Intent(Intent.ACTION_WEB_SEARCH);
+                  i.putExtra(SearchManager.QUERY, "");
+                  i.setPackage("com.google.android.googlequicksearchbox");
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                  if (i.resolveActivity(context.getPackageManager()) != null) return i;
+                  return new Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+              }
+
+              private static Intent voiceIntent(Context context) {
+                  Intent i = new Intent("android.intent.action.VOICE_COMMAND");
+                  i.setPackage("com.google.android.googlequicksearchbox");
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                  if (i.resolveActivity(context.getPackageManager()) != null) return i;
+                  return searchIntent(context);
+              }
+          }
+          """, encoding='utf-8')
+
+          (widget_java / 'ClockWidgetProvider.java').write_text(r"""package app.lawnchair.lawnicons.widgets;
+
+          import android.app.PendingIntent;
+          import android.appwidget.AppWidgetManager;
+          import android.appwidget.AppWidgetProvider;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.provider.AlarmClock;
+          import android.widget.RemoteViews;
+          import app.lawnchair.lawnicons.R;
+
+          public class ClockWidgetProvider extends AppWidgetProvider {
+              @Override
+              public void onUpdate(Context context, AppWidgetManager manager, int[] appWidgetIds) {
+                  for (int id : appWidgetIds) {
+                      RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_clock_satin);
+                      Intent intent = new Intent(AlarmClock.ACTION_SHOW_ALARMS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      PendingIntent pending = PendingIntent.getActivity(context, 4201, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                      views.setOnClickPendingIntent(R.id.clock_root, pending);
+                      manager.updateAppWidget(id, views);
+                  }
+              }
+          }
+          """, encoding='utf-8')
+
+          res = root / 'app/src/main/res'
+          (res / 'layout').mkdir(parents=True, exist_ok=True)
+          (res / 'drawable').mkdir(parents=True, exist_ok=True)
+          (res / 'xml').mkdir(parents=True, exist_ok=True)
+
+          (res / 'layout/widget_search_satin.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/search_root"
+              android:layout_width="match_parent"
+              android:layout_height="58dp"
+              android:background="@drawable/widget_satin_bar_bg"
+              android:gravity="center_vertical"
+              android:orientation="horizontal"
+              android:paddingStart="18dp"
+              android:paddingEnd="10dp">
+              <ImageView android:id="@+id/search_icon" android:layout_width="26dp" android:layout_height="26dp" android:contentDescription="Search" android:src="@drawable/ic_widget_search" />
+              <TextView android:id="@+id/search_label" android:layout_width="0dp" android:layout_height="match_parent" android:layout_marginStart="16dp" android:layout_weight="1" android:gravity="center_vertical" android:fontFamily="sans-serif" android:includeFontPadding="false" android:text="Search" android:textColor="#D8D8DA" android:textSize="16sp" />
+              <ImageView android:id="@+id/search_mic" android:layout_width="40dp" android:layout_height="40dp" android:background="@drawable/widget_mic_bg" android:contentDescription="Voice search" android:padding="10dp" android:src="@drawable/ic_widget_mic" />
+          </LinearLayout>
+          """, encoding='utf-8')
+
+          (res / 'layout/widget_clock_satin.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/clock_root"
+              android:layout_width="match_parent"
+              android:layout_height="wrap_content"
+              android:gravity="center_vertical"
+              android:orientation="vertical"
+              android:paddingStart="20dp"
+              android:paddingTop="13dp"
+              android:paddingEnd="20dp"
+              android:paddingBottom="14dp">
+              <TextClock android:id="@+id/clock_time" android:layout_width="wrap_content" android:layout_height="wrap_content" android:format12Hour="h:mm" android:format24Hour="HH:mm" android:fontFamily="sans-serif-thin" android:includeFontPadding="false" android:textColor="#F3F3F4" android:textSize="52sp" />
+              <TextClock android:id="@+id/clock_date" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:format12Hour="EEE  ·  d MMM" android:format24Hour="EEE  ·  d MMM" android:fontFamily="sans-serif-medium" android:includeFontPadding="false" android:letterSpacing="0.12" android:textColor="#BFC0C4" android:textSize="11sp" />
+          </LinearLayout>
+          """, encoding='utf-8')
+
+          (res / 'drawable/widget_satin_bar_bg.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><corners android:radius="29dp" /><solid android:color="#0017181B" /><stroke android:width="1dp" android:color="#4AFFFFFF" /></shape>
+          """, encoding='utf-8')
+          (res / 'drawable/widget_satin_card_bg.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#00000000" /></shape>
+          """, encoding='utf-8')
+          (res / 'drawable/widget_mic_bg.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval"><solid android:color="#1417181B" /><stroke android:width="1dp" android:color="#3DFFFFFF" /></shape>
+          """, encoding='utf-8')
+          (res / 'drawable/ic_widget_search.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="@android:color/transparent" android:strokeColor="#ECECEF" android:strokeWidth="2.2" android:strokeLineCap="round" android:pathData="M10.8,4.2A6.6,6.6 0,1 0,10.8,17.4A6.6,6.6 0,1 0,10.8,4.2M15.8,15.8L21,21" /></vector>
+          """, encoding='utf-8')
+          (res / 'drawable/ic_widget_mic.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="@android:color/transparent" android:strokeColor="#ECECEF" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M12,3A3,3 0,0 0,9,6V12A3,3 0,0 0,15,12V6A3,3 0,0 0,12,3M5.5,11.5A6.5,6.5 0,0 0,18.5,11.5M12,18V22M9,22H15" /></vector>
+          """, encoding='utf-8')
+          (res / 'xml/search_widget_info.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android" android:minWidth="250dp" android:minHeight="54dp" android:targetCellWidth="4" android:targetCellHeight="1" android:resizeMode="horizontal" android:widgetCategory="home_screen" android:initialLayout="@layout/widget_search_satin" android:previewLayout="@layout/widget_search_satin" android:updatePeriodMillis="0" />
+          """, encoding='utf-8')
+          (res / 'xml/clock_widget_info.xml').write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android" android:minWidth="220dp" android:minHeight="110dp" android:targetCellWidth="4" android:targetCellHeight="2" android:resizeMode="horizontal|vertical" android:widgetCategory="home_screen" android:initialLayout="@layout/widget_clock_satin" android:previewLayout="@layout/widget_clock_satin" android:updatePeriodMillis="0" />
+          """, encoding='utf-8')
+
+          manifest_text = manifest.read_text(encoding='utf-8')
+          widget_receivers = r"""
+                  <receiver android:name="app.lawnchair.lawnicons.widgets.SearchWidgetProvider" android:exported="true">
+                      <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/search_widget_info" />
+                  </receiver>
+                  <receiver android:name="app.lawnchair.lawnicons.widgets.ClockWidgetProvider" android:exported="true">
+                      <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/clock_widget_info" />
+                  </receiver>
+          """
+          if 'widgets.SearchWidgetProvider' not in manifest_text:
+              manifest_text = manifest_text.replace('</application>', widget_receivers + '\n    </application>')
+          manifest.write_text(manifest_text, encoding='utf-8')
+
+          assets = root / 'app/src/main/assets'
+          assets.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile(root / 'LICENSE', assets / 'LICENSE_LAWNICONS.txt')
+          (assets / 'GRAPHITE_DERIVATIVE_NOTICE.txt').write_text(
+              'Graphite v4.2 Preview is a modified derivative build based on Lawnicons.\n'
+              'Source base: LawnchairLauncher/lawnicons commit '
+              '3a4eea094d23e29aceb1937b3db3312baf979af1.\n'
+              'Modifications: application identity, Graphite palette, shared satin '
+              'background, foreground sizing, and packaging.\n',
+              encoding='utf-8',
+          )
+
+          appfilter = root / 'app/assets/appfilter.xml'
+          xml_root = ET.parse(appfilter).getroot()
+          items = xml_root.findall('item')
+          packages = set()
+          drawables = set()
+          for item in items:
+              comp = item.attrib.get('component', '')
+              match = re.match(r'ComponentInfo\{([^/]+)/', comp)
+              if match:
+                  packages.add(match.group(1))
+              drawable = item.attrib.get('drawable')
+              if drawable:
+                  drawables.add(drawable)
+          svgs = list((root / 'svgs').glob('*.svg'))
+          report = Path('graphite-v4.2-preview-report.txt')
+          report.write_text(
+              'GRAPHITE v4.2 PREVIEW BUILD REPORT\n'
+              '================================\n'
+              'Lawnicons commit: 3a4eea094d23e29aceb1937b3db3312baf979af1\n'
+              f'Component mappings: {len(items)}\n'
+              f'Unique packages: {len(packages)}\n'
+              f'Unique mapped drawables: {len(drawables)}\n'
+              f'SVG source icons: {len(svgs)}\n'
+              f'Application ID: {app_id}\n'
+              f'Foreground: {foreground}\n'
+              f'Foreground inset: {foreground_inset}\n',
+              encoding='utf-8',
+          )
+          print(report.read_text())
+          PY
+
+      - name: Build all Graphite vector icons and APK
+        run: |
+          cd work/lawnicons
+          ./gradlew app:assembleDebug --stacktrace
+
+      - name: Collect APK
+        run: |
+          set -e
+          APK="$(find work/lawnicons/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "APK not found"
+            find work/lawnicons/app/build/outputs -maxdepth 6 -type f || true
+            exit 1
+          fi
+          cp "$APK" Graphite-v4.2-Preview.apk
+          echo "Built: $APK"
+          ls -lh Graphite-v4.2-Preview.apk
+
+      - name: Add generated-resource counts to report
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          runtime = Path('work/lawnicons/app/src/runtime/res/drawable')
+          all_xml = list(runtime.glob('*.xml')) if runtime.exists() else []
+          fg = list(runtime.glob('*_foreground.xml')) if runtime.exists() else []
+          report = Path('graphite-v4.2-preview-report.txt')
+          with report.open('a', encoding='utf-8') as f:
+              f.write(f'Generated drawable XML files: {len(all_xml)}\n')
+              f.write(f'Generated foreground vectors: {len(fg)}\n')
+              f.write(f'APK size bytes: {Path("Graphite-v4.2-Preview.apk").stat().st_size}\n')
+          print(report.read_text())
+          PY
+
+      - name: Upload Graphite Engine APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Graphite-v4.2-Preview
+          path: |
+            Graphite-v4.2-Preview.apk
+            graphite-v4.2-preview-report.txt
+          if-no-files-found: error
